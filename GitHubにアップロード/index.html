@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="theme-color" content="#11172c">
+<title>AR寄せ書き | 暗号化版</title>
+<style>
+:root{color-scheme:dark;font-family:system-ui,-apple-system,"Noto Sans JP",sans-serif}*{box-sizing:border-box}body{margin:0;background:#11172c;color:#fff}button,input{font:inherit}button{cursor:pointer}.screen{min-height:100dvh;display:flex;align-items:center;justify-content:center;padding:22px}.panel{width:min(430px,100%);padding:28px;border-radius:24px;background:linear-gradient(145deg,#242d49,#171d33);box-shadow:0 12px 45px #0005}.eyebrow{letter-spacing:.19em;color:#9eaee6;font-size:12px;font-weight:700}h1{font-size:28px;margin:14px 0}p{line-height:1.8;color:#dce3f5}label{display:block;font-size:13px;margin:22px 0 8px}input{width:100%;padding:14px;border:1px solid #65708f;background:#0d1427;color:white;border-radius:12px}button.primary{width:100%;margin-top:14px;background:#e9e3fb;border:0;color:#161c32;font-weight:800;padding:14px;border-radius:12px}.muted{color:#9ea9c3;font-size:12px}.err{color:#ffc2c2;min-height:1em}.link{color:#e6d8ff}.hide{display:none!important}#arScreen{position:fixed;inset:0;overflow:hidden;background:#0b1020}#arCanvas{width:100%;height:100%;display:block}#cameraVideo{display:none}#hud{position:absolute;top:env(safe-area-inset-top,0px);left:0;right:0;pointer-events:none;padding:14px;display:flex;justify-content:space-between;align-items:flex-start;gap:12px}#hud span{border-radius:20px;background:#071125c9;padding:10px 14px;font-size:12px;line-height:1.5}#bottom{position:absolute;bottom:calc(18px + env(safe-area-inset-bottom,0px));left:12px;right:12px;display:flex;gap:8px;align-items:end;justify-content:center}#bottom button{border:1px solid #ffffff66;background:#101930e6;color:#fff;border-radius:12px;padding:12px 14px;font-weight:600}#bottom .pill{background:#101930e6;padding:10px;border-radius:12px;font-size:12px;flex:1;max-width:400px;line-height:1.5}#bottom button:disabled{opacity:.4}#status{max-width:220px}#photoInput{display:none}a{color:#cabfff}
+</style>
+</head><body>
+<div id="login" class="screen"><div class="panel"><div class="eyebrow">A LITTLE MEMORY, IN AR</div><h1>AR寄せ書き <span style="font-size:14px">暗号化版</span></h1><p>入力したパスワードで写真・メッセージを復号してから、スマホのカメラが開きます。印刷したマーカー <b>ID 23</b> を映すと、寄せ書きのメッセージが浮かび上がります。</p><form id="passwordForm"><label for="password">パスワード</label><input id="password" type="password" autocomplete="off" placeholder="パスワードを入力" required><button class="primary" type="submit">カメラを起動する</button><div class="err" id="error" role="alert"></div></form><p class="muted">スマホではHTTPS公開したページから起動してください。</p></div></div>
+<div id="arScreen" class="hide"><video id="cameraVideo" autoplay muted playsinline></video><canvas id="arCanvas"></canvas><div id="hud"><span>AR寄せ書き · ID 23</span><span id="status" aria-live="polite">カメラを準備中…</span></div><div id="bottom"><div class="pill">マーカーをカメラに映してください。認識すると、メッセージが図形の位置に追従します。</div><button id="switchCamera" aria-label="カメラ切替">切替</button><button id="exitCamera">終了</button></div></div>
+<script src="https://cdn.jsdelivr.net/gh/damianofalcioni/js-aruco2@master/src/cv.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/damianofalcioni/js-aruco2@master/src/aruco.js"></script>
+<script src="dictionary.js"></script>
+
+<script src="main.js"></script>
+</body></html>
