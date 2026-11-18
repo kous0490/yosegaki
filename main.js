@@ -1,9 +1,5 @@
-'use strict';
-// Password verification and photo access are performed on Cloudflare Workers.
-const API_BASE = window.AR_CONFIG?.API_BASE || '';
-let authToken = '';
-let photoImages = [];
-let lastPhotoError = ''; 
+"use strict";
+// No password or plaintext photographs are stored in this public repository.
 const form = document.querySelector('#passwordForm');
 const video = document.querySelector('#cameraVideo');
 const canvas = document.querySelector('#arCanvas');
@@ -13,65 +9,54 @@ const login = document.querySelector('#login');
 const arScreen = document.querySelector('#arScreen');
 const source = document.createElement('canvas');
 const srcCtx = source.getContext('2d', {willReadFrequently:true});
-let stream = null, running = false, facingMode='environment', detector=null, frame=0, seen=0, lastCorners=null;
-
-form.addEventListener('submit', async e=> {
-  e.preventDefault();
-  const error = document.querySelector('#error');
-  const submitButton = form.querySelector('button');
-  error.textContent = '';
-  if (!API_BASE.startsWith('https://')) {
-    error.textContent = 'config.js のAPI_BASEにWorkersのHTTPS URLを設定してください';
-    return;
-  }
-  submitButton.disabled = true;
-  try {
-    const response = await fetch(`${API_BASE}/api/login`, {
-      method: 'POST', headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({password: document.querySelector('#password').value}),
-      cache: 'no-store'
-    });
-    if (!response.ok) {error.textContent = response.status === 401 ? 'パスワードが違います' : '認証エラー：' + response.status; return;}
-    const data = await response.json();
-    authToken = data.token;
-    document.querySelector('#password').value = '';
-    login.classList.add('hide'); arScreen.classList.remove('hide');
-    // Photos are fetched only after server-side authorization succeeds.
-    await Promise.all([startCamera(), loadPhotos()]);
-  } catch (err) {error.textContent = 'サーバーに接続できません。URL・CORS設定を確認してください'; console.error(err);}
-  finally {submitButton.disabled = false;}
+let stream=null,running=false,facingMode='environment',detector=null,frame=0,seen=0,lastCorners=null;
+let photoImages=[],messageTitle='AR YOSEGAKI',messageBody='';
+const enc = new TextEncoder();
+function b64ToBytes(x){return Uint8Array.from(atob(x), c=>c.charCodeAt(0));}
+async function decryptBundle(password){
+ const response=await fetch('./content.enc.json',{cache:'no-store'});
+ if(!response.ok)throw new Error('暗号化データが見つかりません (content.enc.json)');
+ const bundle=await response.json();
+ if(bundle.version!==1||bundle.kdf!=='PBKDF2-SHA256'||bundle.cipher!=='AES-256-GCM')throw new Error('非対応のデータ形式です');
+ const keyMaterial=await crypto.subtle.importKey('raw',enc.encode(password),'PBKDF2',false,['deriveKey']);
+ const key=await crypto.subtle.deriveKey({name:'PBKDF2',salt:b64ToBytes(bundle.salt),iterations:bundle.iterations,hash:'SHA-256'},keyMaterial,{name:'AES-GCM',length:256},false,['decrypt']);
+ const decrypted=await crypto.subtle.decrypt({name:'AES-GCM',iv:b64ToBytes(bundle.iv)},key,b64ToBytes(bundle.data));
+ const content=JSON.parse(new TextDecoder().decode(decrypted));
+ if(!Array.isArray(content.photos))throw new Error('写真データの形式が不正です');
+ return content;
+}
+async function decodePhoto(dataUrl){
+ if(!/^data:image\/(jpeg|png|webp);base64,/.test(dataUrl))throw new Error('画像形式が無効です');
+ const response=await fetch(dataUrl);
+ const blob=await response.blob();
+ if(typeof createImageBitmap==='function')return await createImageBitmap(blob);
+ const url=URL.createObjectURL(blob);
+ try {const img=new Image();img.src=url;await img.decode();return img;}
+ finally{URL.revokeObjectURL(url);}
+}
+form.addEventListener('submit',async e=>{
+ e.preventDefault();
+ const err=document.querySelector('#error'),btn=form.querySelector('button');
+ err.textContent='';btn.disabled=true;
+ try{
+  const payload=await decryptBundle(document.querySelector('#password').value);
+  const imgs=[];
+  for(const src of payload.photos.slice(0,8)){try{imgs.push(await decodePhoto(src));}catch(e){console.warn('画像読み込み失敗',e);}}
+  photoImages.forEach(i=>i.close?.()); photoImages=imgs;
+  messageTitle=String(payload.title||'AR寄せ書き').slice(0,45);
+  messageBody=String(payload.message||'').slice(0,70);
+  document.querySelector('#password').value='';
+  login.classList.add('hide');arScreen.classList.remove('hide');
+  await startCamera();
+ }catch(ex){err.textContent=ex.name==='OperationError'?'パスワードが違います':'読み込みエラー：'+ex.message;console.warn(ex);}
+ finally{btn.disabled=false;}
 });
-async function loadPhotos() {
-  photoImages = [];
-  lastPhotoError = '';
-  try {
-    const headers = {Authorization:`Bearer ${authToken}`};
-    const r = await fetch(`${API_BASE}/api/photos`, {headers, cache:'no-store'});
-    if (!r.ok) throw new Error(`photos: ${r.status}`);
-    const {files} = await r.json();
-    for (const file of files.slice(0, 8)) {
-      const response = await fetch(`${API_BASE}/api/photo/${encodeURIComponent(file)}`, {headers, cache:'no-store'});
-      if (!response.ok) continue;
-      const blob = await response.blob();
-      const img = await decodePhoto(blob);
-      photoImages.push(img);
-    }
-    if (photoImages.length) statusEl.textContent = `写真 ${photoImages.length} 枚を読み込みました（約4.5秒ごと切替）`; else statusEl.textContent='写真未登録：デモイラストを表示します';
-  } catch (err) {lastPhotoError = `写真の読み込み失敗: ${err.message}`; console.warn(lastPhotoError, err); statusEl.textContent=lastPhotoError;}
-}
-async function decodePhoto(blob) {
-  if (typeof createImageBitmap === 'function') return createImageBitmap(blob);
-  // Safari fallback. Revoke object URL immediately after decode.
-  const url = URL.createObjectURL(blob);
-  try {const img = new Image(); img.src=url; await img.decode(); return img;}
-  finally {URL.revokeObjectURL(url);}
-}
 document.querySelector('#switchCamera').onclick = async()=>{facingMode = facingMode==='environment'?'user':'environment'; await startCamera();};
-document.querySelector('#exitCamera').onclick = ()=>{stopCamera();authToken='';photoImages.forEach(i=>i.close?.());photoImages=[];arScreen.classList.add('hide');login.classList.remove('hide');};
+document.querySelector('#exitCamera').onclick = ()=>{stopCamera();photoImages.forEach(i=>i.close?.());photoImages=[];messageTitle='AR YOSEGAKI';messageBody='';arScreen.classList.add('hide');login.classList.remove('hide');};
 window.addEventListener('pagehide', stopCamera);
 
 async function startCamera(){
- stopCamera(); statusEl.textContent='カメラを準備中…';
+ stopCamera(); statusEl.textContent='カメラを準備中…（写真 '+photoImages.length+' 枚）';
  if(!window.isSecureContext && location.hostname!=='localhost') {statusEl.textContent='HTTPSで公開してください';return;}
  if(!navigator.mediaDevices?.getUserMedia){statusEl.textContent='このブラウザではカメラを使えません';return;}
  if(typeof AR === 'undefined' || !window.MARKER_CODES){statusEl.textContent='認識ライブラリの読み込みに失敗';return;}
@@ -116,8 +101,8 @@ function overlay(p){
  ctx.shadowColor='#0009';ctx.shadowBlur=18;
  roundRect(ctx,-.26,-1.24,1.52,.90,.10,'#fffdf2');
  ctx.shadowBlur=0;
- ctx.fillStyle='#262842';ctx.textAlign='center';ctx.save();ctx.scale(.001,.001);ctx.font='bold 108px sans-serif';ctx.fillText('大学生活、ありがとう！',500,-920);ctx.restore();
- ctx.fillStyle='#655e77';ctx.save();ctx.scale(.001,.001);ctx.font='69px sans-serif';ctx.fillText('たくさんの思い出を、これからも。',500,-750);ctx.restore();
+ ctx.fillStyle='#262842';ctx.textAlign='center';ctx.save();ctx.scale(.001,.001);ctx.font='bold 108px sans-serif';ctx.fillText(messageTitle,500,-920);ctx.restore();
+ ctx.fillStyle='#655e77';ctx.save();ctx.scale(.001,.001);ctx.font='69px sans-serif';ctx.fillText(messageBody,500,-750);ctx.restore();
  // Display the first protected photo if uploaded; keep the demo art otherwise.
  if (photoImages.length) {
    const img=photoImages[Math.floor(Date.now()/4500)%photoImages.length];
@@ -132,7 +117,7 @@ function overlay(p){
  ctx.fillStyle='#f9e2a4';ctx.beginPath();ctx.arc(.74,-.58,.07,0,Math.PI*2);ctx.fill();
  ctx.fillStyle='#6b9a9f';ctx.beginPath();ctx.moveTo(.05,-.38);ctx.lineTo(.36,-.60);ctx.lineTo(.56,-.40);ctx.lineTo(.76,-.53);ctx.lineTo(.96,-.39);ctx.closePath();ctx.fill();
  }
- ctx.fillStyle='#f8eee6';ctx.save();ctx.scale(.001,.001);ctx.font='65px sans-serif';ctx.fillText('AR YOSEGAKI · DEMO',500,-250);ctx.restore();
+ ctx.fillStyle='#f8eee6';ctx.save();ctx.scale(.001,.001);ctx.font='65px sans-serif';ctx.fillText('AR YOSEGAKI',500,-250);ctx.restore();
  ctx.restore();
 }
 function roundRect(c,x,y,w,h,r,fill){c.beginPath();c.roundRect(x,y,w,h,r);c.fillStyle=fill;c.fill();}
