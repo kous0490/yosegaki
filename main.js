@@ -1,123 +1,40 @@
 "use strict";
-// No password or plaintext photographs are stored in this public repository.
-const form = document.querySelector('#passwordForm');
-const video = document.querySelector('#cameraVideo');
-const canvas = document.querySelector('#arCanvas');
-const ctx = canvas.getContext('2d');
-const statusEl = document.querySelector('#status');
-const login = document.querySelector('#login');
-const arScreen = document.querySelector('#arScreen');
-const source = document.createElement('canvas');
-const srcCtx = source.getContext('2d', {willReadFrequently:true});
-let stream=null,running=false,facingMode='environment',detector=null,frame=0,seen=0,lastCorners=null;
-let photoImages=[],messageTitle='AR YOSEGAKI',messageBody='';
-const enc = new TextEncoder();
-function b64ToBytes(x){return Uint8Array.from(atob(x), c=>c.charCodeAt(0));}
-async function decryptBundle(password){
- const response=await fetch('./content.enc.json',{cache:'no-store'});
- if(!response.ok)throw new Error('暗号化データが見つかりません (content.enc.json)');
- const bundle=await response.json();
- if(bundle.version!==1||bundle.kdf!=='PBKDF2-SHA256'||bundle.cipher!=='AES-256-GCM')throw new Error('非対応のデータ形式です');
- const keyMaterial=await crypto.subtle.importKey('raw',enc.encode(password),'PBKDF2',false,['deriveKey']);
- const key=await crypto.subtle.deriveKey({name:'PBKDF2',salt:b64ToBytes(bundle.salt),iterations:bundle.iterations,hash:'SHA-256'},keyMaterial,{name:'AES-GCM',length:256},false,['decrypt']);
- const decrypted=await crypto.subtle.decrypt({name:'AES-GCM',iv:b64ToBytes(bundle.iv)},key,b64ToBytes(bundle.data));
- const content=JSON.parse(new TextDecoder().decode(decrypted));
- if(!Array.isArray(content.photos))throw new Error('写真データの形式が不正です');
- return content;
+const $=s=>document.querySelector(s);
+const form=$('#passwordForm'),video=$('#cameraVideo'),canvas=$('#arCanvas'),ctx=canvas.getContext('2d');
+const statusEl=$('#status'),login=$('#login'),arScreen=$('#arScreen');
+const source=document.createElement('canvas'),srcCtx=source.getContext('2d',{willReadFrequently:true});
+const enc=new TextEncoder();
+let stream=null,running=false,detector=null,frame=0,photos=[],title='',message='';
+let phase='scan',scanSince=0,lastFound=0,scanned=false,selected=-1;
+let heading=0,pitch=0,roll=0,baseHeading=0,orientationActive=false,orientationListener=null;
+let dragging=false,dragX=0,dragY=0,dragMoved=false,dragYaw=0,dragPitch=0;
+let hitAreas=[],layout=[],lastRender=0,viewW=0,viewH=0;
+const TAU=Math.PI*2,rad=Math.PI/180;
+function bytes(x){return Uint8Array.from(atob(x),c=>c.charCodeAt(0));}
+function norm(a){return Math.atan2(Math.sin(a),Math.cos(a));}
+async function decrypt(password){const r=await fetch('./content.enc.json',{cache:'no-store'});if(!r.ok)throw Error('content.enc.json がありません');const b=await r.json();if(b.version!==1||b.kdf!=='PBKDF2-SHA256'||b.cipher!=='AES-256-GCM')throw Error('暗号形式が違います');const m=await crypto.subtle.importKey('raw',enc.encode(password),'PBKDF2',false,['deriveKey']);const k=await crypto.subtle.deriveKey({name:'PBKDF2',salt:bytes(b.salt),iterations:b.iterations,hash:'SHA-256'},m,{name:'AES-GCM',length:256},false,['decrypt']);return JSON.parse(new TextDecoder().decode(await crypto.subtle.decrypt({name:'AES-GCM',iv:bytes(b.iv)},k,bytes(b.data))));}
+async function decodePhoto(src){if(!/^data:image\/(jpeg|png|webp);base64,/.test(src))throw Error('画像形式が不正');const b=await(await fetch(src)).blob();if(window.createImageBitmap)return createImageBitmap(b);return await new Promise((ok,no)=>{const i=new Image();i.onload=()=>ok(i);i.onerror=no;i.src=src;});}
+form.addEventListener('submit',async e=>{e.preventDefault();const btn=form.querySelector('button');btn.disabled=true;$('#error').textContent='';try{const data=await decrypt($('#password').value);const imgs=[];for(const src of (data.photos||[]).slice(0,60)){imgs.push(await decodePhoto(src));}photos.forEach(p=>p.close?.());photos=imgs;title=String(data.title||'AR寄せ書き');message=String(data.message||'');$('#password').value='';login.classList.add('hide');arScreen.classList.remove('hide');await startCamera();}catch(err){$('#error').textContent=err.name==='OperationError'?'パスワードが違います':'エラー：'+err.message;}finally{btn.disabled=false;}});
+function stopCamera(){running=false;stream?.getTracks().forEach(t=>t.stop());stream=null;video.srcObject=null;}
+async function startCamera(){stopCamera();phase='scan';scanSince=0;lastFound=0;selected=-1;orientationActive=false;dragYaw=dragPitch=0;$('#detail').classList.add('hide');$('#orientationButton').classList.add('hide');$('#scanGuide').classList.remove('hide');statusEl.textContent='マーカーを探しています';if(!navigator.mediaDevices?.getUserMedia){statusEl.textContent='カメラ非対応のブラウザです';return;}try{if(typeof AR==='undefined'||!window.MARKER_CODES)throw Error('マーカー認識ライブラリを読み込めません');AR.DICTIONARIES.OPENCV_4X4_50={nBits:16,tau:3,codeList:window.MARKER_CODES};detector=new AR.Detector({dictionaryName:'OPENCV_4X4_50',maxHammingDistance:2});stream=await navigator.mediaDevices.getUserMedia({audio:false,video:{facingMode:{ideal:'environment'},width:{ideal:1280},height:{ideal:720}}});video.srcObject=stream;await video.play();running=true;requestAnimationFrame(draw);}catch(e){statusEl.textContent='起動失敗：'+(e.message||e.name);}}
+$('#exitCamera').onclick=()=>{stopCamera();photos.forEach(p=>p.close?.());photos=[];arScreen.classList.add('hide');login.classList.remove('hide');};
+$('#switchCamera').onclick=async()=>{if(!stream)return;const t=stream.getVideoTracks()[0],settings=t.getSettings();const mode=settings.facingMode==='user'?'environment':'user';stopCamera();try{stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:mode}},audio:false});video.srcObject=stream;await video.play();running=true;requestAnimationFrame(draw);}catch(e){statusEl.textContent='切替失敗：'+e.message;}};
+window.addEventListener('pagehide',stopCamera);
+function sensor(e){if(e.alpha==null)return;const a=e.alpha*rad,b=(e.beta||0)*rad,g=(e.gamma||0)*rad;const screenAngle=(screen.orientation?.angle||0)*rad; // deviceorientation gives a usable relative direction, not a geospatial world anchor
+heading=-a-screenAngle;pitch=Math.max(-1.35,Math.min(1.35,b-Math.PI/2));roll=g;orientationActive=true;}
+async function enableOrientation(){try{if(typeof DeviceOrientationEvent==='undefined')throw Error('向きセンサーがありません');if(typeof DeviceOrientationEvent.requestPermission==='function'){const p=await DeviceOrientationEvent.requestPermission();if(p!=='granted')throw Error('向きセンサーの許可が必要です');}if(!orientationListener){orientationListener=sensor;window.addEventListener('deviceorientation',sensor,true);}$('#orientationButton').classList.add('hide');statusEl.textContent='スマホを動かして写真を見渡せます';}catch(e){statusEl.textContent='センサー不可：画面をスワイプして見渡せます';}}
+$('#orientationButton').onclick=enableOrientation;
+function buildLayout(){const n=photos.length||8;const columns=Math.max(8,Math.ceil(n/3));layout=Array.from({length:n},(_,i)=>{const row=i%3,col=Math.floor(i/3);const angle=(col+row*.28)/columns*TAU;return {angle,elevation:[-.29,0,.29][row],index:i};});}
+function finishScan(){phase='gallery';buildLayout();baseHeading=heading;dragYaw=dragPitch=0;$('#scanGuide').classList.add('hide');$('#orientationButton').classList.remove('hide');statusEl.textContent='読み取り完了！ 向きセンサーを有効にしてください';if(typeof DeviceOrientationEvent!=='undefined'&&typeof DeviceOrientationEvent.requestPermission!=='function')enableOrientation();}
+function resize(){const d=Math.min(devicePixelRatio||1,2),w=Math.round(innerWidth*d),h=Math.round(innerHeight*d);if(canvas.width!==w||canvas.height!==h){canvas.width=w;canvas.height=h;}viewW=w;viewH=h;return {w,h};}
+function draw(t){if(!running)return;const {w,h}=resize();ctx.clearRect(0,0,w,h);if(video.videoWidth){const s=Math.max(w/video.videoWidth,h/video.videoHeight),dw=video.videoWidth*s,dh=video.videoHeight*s;ctx.drawImage(video,(w-dw)/2,(h-dh)/2,dw,dh);if(phase==='scan')scan(t,w,h);else gallery(t,w,h);}requestAnimationFrame(draw);}
+function scan(t,w,h){if(frame++%3===0){const sw=480,sh=Math.round(sw*h/w);source.width=sw;source.height=sh;srcCtx.drawImage(canvas,0,0,sw,sh);try{const markers=detector.detect(srcCtx.getImageData(0,0,sw,sh));const m=markers.find(x=>x.id===23);if(m){lastFound=t;if(!scanSince)scanSince=t;const c=m.corners;ctx.save();ctx.strokeStyle='#65ffcd';ctx.lineWidth=5;ctx.beginPath();c.forEach((p,i)=>i?ctx.lineTo(p.x*w/sw,p.y*h/sh):ctx.moveTo(p.x*w/sw,p.y*h/sh));ctx.closePath();ctx.stroke();ctx.restore();}}catch(e){statusEl.textContent='認識エラー：'+e.message;}}if(t-lastFound>240)scanSince=0;const sec=scanSince?Math.max(0,3-(t-scanSince)/1000):3;$('#countdown').textContent=scanSince?String(Math.ceil(sec)):'—';statusEl.textContent=scanSince?'認識中… '+sec.toFixed(1)+'秒':'マーカーID 23を探しています';if(scanSince&&t-scanSince>=3000)finishScan();}
+function round(x,y,w,h,r,color){ctx.fillStyle=color;ctx.beginPath();ctx.roundRect(x,y,w,h,r);ctx.fill();}
+function gallery(t,w,h){const scale=w/innerWidth;const f=w/(2*Math.tan(65*rad/2));const yaw=(orientationActive?norm(heading-baseHeading):0)+dragYaw;const tilt=(orientationActive?pitch:0)+dragPitch;hitAreas=[];const visible=[];for(const item of layout){const delta=norm(item.angle-yaw),vertical=item.elevation-tilt;if(Math.abs(delta)>1.2||Math.abs(vertical)>1.15)continue;const x=w/2+Math.tan(delta)*f,y=h/2-Math.tan(vertical)*f;const depth=Math.max(.55,Math.cos(delta));const cardW=Math.min(w*.44,160*scale)*depth,cardH=cardW*1.75;visible.push({item,x,y,cardW,cardH,depth});}visible.sort((a,b)=>a.depth-b.depth);for(const p of visible){const {x,y,cardW:cw,cardH:ch,item}=p;round(x-cw/2-5,y-ch/2-5,cw+10,ch+10,13*scale,'#ffffffdd');ctx.save();ctx.beginPath();ctx.roundRect(x-cw/2,y-ch/2,cw,ch,10*scale);ctx.clip();const img=photos[item.index];if(img){const ratio=img.width/img.height,br=cw/ch;let sx=0,sy=0,sw=img.width,sh=img.height;if(ratio>br){sw=img.height*br;sx=(img.width-sw)/2;}else{sh=img.width/br;sy=(img.height-sh)/2;}ctx.drawImage(img,sx,sy,sw,sh,x-cw/2,y-ch/2,cw,ch);}else{const grad=ctx.createLinearGradient(x,y-ch/2,x,y+ch/2);grad.addColorStop(0,'#9bdedb');grad.addColorStop(1,'#a9a5ed');round(x-cw/2,y-ch/2,cw,ch,10*scale,grad);ctx.fillStyle='#17223a';ctx.textAlign='center';ctx.font=`${Math.max(12,18*scale)}px sans-serif`;ctx.fillText('思い出 '+(item.index+1),x,y);}ctx.restore();hitAreas.push({x:x-cw/2,y:y-ch/2,w:cw,h:ch,index:item.index});}
+const badge=`${photos.length}枚 · ${Math.round(((yaw%TAU)+TAU)%TAU/rad)}°`;statusEl.textContent=selected>=0?'写真を拡大表示中':(orientationActive?'周囲を見渡せます · ':'スワイプで周囲を見渡せます · ')+badge;
 }
-async function decodePhoto(dataUrl){
- if(!/^data:image\/(jpeg|png|webp);base64,/.test(dataUrl))throw new Error('画像形式が無効です');
- const response=await fetch(dataUrl);
- const blob=await response.blob();
- if(typeof createImageBitmap==='function')return await createImageBitmap(blob);
- const url=URL.createObjectURL(blob);
- try {const img=new Image();img.src=url;await img.decode();return img;}
- finally{URL.revokeObjectURL(url);}
-}
-form.addEventListener('submit',async e=>{
- e.preventDefault();
- const err=document.querySelector('#error'),btn=form.querySelector('button');
- err.textContent='';btn.disabled=true;
- try{
-  const payload=await decryptBundle(document.querySelector('#password').value);
-  const imgs=[];
-  for(const src of payload.photos.slice(0,8)){try{imgs.push(await decodePhoto(src));}catch(e){console.warn('画像読み込み失敗',e);}}
-  photoImages.forEach(i=>i.close?.()); photoImages=imgs;
-  messageTitle=String(payload.title||'AR寄せ書き').slice(0,45);
-  messageBody=String(payload.message||'').slice(0,70);
-  document.querySelector('#password').value='';
-  login.classList.add('hide');arScreen.classList.remove('hide');
-  await startCamera();
- }catch(ex){err.textContent=ex.name==='OperationError'?'パスワードが違います':'読み込みエラー：'+ex.message;console.warn(ex);}
- finally{btn.disabled=false;}
-});
-document.querySelector('#switchCamera').onclick = async()=>{facingMode = facingMode==='environment'?'user':'environment'; await startCamera();};
-document.querySelector('#exitCamera').onclick = ()=>{stopCamera();photoImages.forEach(i=>i.close?.());photoImages=[];messageTitle='AR YOSEGAKI';messageBody='';arScreen.classList.add('hide');login.classList.remove('hide');};
-window.addEventListener('pagehide', stopCamera);
-
-async function startCamera(){
- stopCamera(); statusEl.textContent='カメラを準備中…（写真 '+photoImages.length+' 枚）';
- if(!window.isSecureContext && location.hostname!=='localhost') {statusEl.textContent='HTTPSで公開してください';return;}
- if(!navigator.mediaDevices?.getUserMedia){statusEl.textContent='このブラウザではカメラを使えません';return;}
- if(typeof AR === 'undefined' || !window.MARKER_CODES){statusEl.textContent='認識ライブラリの読み込みに失敗';return;}
- try {
-   AR.DICTIONARIES.OPENCV_4X4_50={nBits:16,tau:3,codeList:window.MARKER_CODES};
-   detector=new AR.Detector({dictionaryName:'OPENCV_4X4_50',maxHammingDistance:2});
-   stream=await navigator.mediaDevices.getUserMedia({audio:false,video:{facingMode:{ideal:facingMode},width:{ideal:1280},height:{ideal:720}}});
-   video.srcObject=stream;await video.play();
-   running=true;frame=0;seen=0;lastCorners=null;requestAnimationFrame(draw);
- }catch(e){statusEl.textContent=e.name==='NotAllowedError'?'カメラの使用を許可してください':'起動失敗：'+(e.message||e.name); console.error(e);}
-}
-function stopCamera(){running=false; if(stream){stream.getTracks().forEach(t=>t.stop());stream=null;}video.srcObject=null;}
-function resize(){const dpr=Math.min(devicePixelRatio||1,2);const w=window.innerWidth,h=window.innerHeight;const px=Math.round(w*dpr),py=Math.round(h*dpr);if(canvas.width!==px||canvas.height!==py){canvas.width=px;canvas.height=py;}return {w:px,h:py};}
-function draw(){
- if(!running)return;
- const {w,h}=resize();const vw=video.videoWidth,vh=video.videoHeight;
- if(vw && vh){
-  // Match object-fit:cover in both detection and display coordinates.
-  const scale=Math.max(w/vw,h/vh),dw=vw*scale,dh=vh*scale,dx=(w-dw)/2,dy=(h-dh)/2;
-  ctx.clearRect(0,0,w,h);ctx.drawImage(video,dx,dy,dw,dh);
-  if(frame++%3===0){
-   const sw=720,sh=Math.round(sw*h/w);source.width=sw;source.height=sh;
-   srcCtx.drawImage(canvas,0,0,sw,sh);
-   try {let markers=detector.detect(srcCtx.getImageData(0,0,sw,sh));
-    let target=markers.find(m=>m.id===23);
-    if(target){lastCorners=target.corners.map(p=>({x:p.x*w/sw,y:p.y*h/sh}));seen=performance.now();statusEl.textContent='✓ ID 23 を認識中';}
-    else if(performance.now()-seen>300){lastCorners=null;statusEl.textContent='マーカー ID 23 を探しています';}
-   } catch(err){statusEl.textContent='検出エラー：'+err.message; console.error(err);}
-  }
-  if(lastCorners && performance.now()-seen<380){overlay(lastCorners);}
- } else {ctx.fillStyle='#0b1020';ctx.fillRect(0,0,w,h);}
- requestAnimationFrame(draw);
-}
-function overlay(p){
- // Four marker corners; use its local axes so decorations track position and rotation.
- const A=p[0],B=p[1],D=p[3],side=Math.hypot(B.x-A.x,B.y-A.y);
- if(side<20)return;
- ctx.save();ctx.strokeStyle='#68f4d8';ctx.lineWidth=Math.max(2,side*.023);ctx.beginPath();p.forEach((pt,i)=>i?ctx.lineTo(pt.x,pt.y):ctx.moveTo(pt.x,pt.y));ctx.closePath();ctx.stroke();
- const vx={x:(B.x-A.x),y:(B.y-A.y)},vy={x:(D.x-A.x),y:(D.y-A.y)};
- // Affine overlay: suitable for preview, not full 6DOF perspective tracking.
- ctx.transform(vx.x,vx.y,vy.x,vy.y,A.x,A.y);
- ctx.shadowColor='#0009';ctx.shadowBlur=18;
- roundRect(ctx,-.26,-1.24,1.52,.90,.10,'#fffdf2');
- ctx.shadowBlur=0;
- ctx.fillStyle='#262842';ctx.textAlign='center';ctx.save();ctx.scale(.001,.001);ctx.font='bold 108px sans-serif';ctx.fillText(messageTitle,500,-920);ctx.restore();
- ctx.fillStyle='#655e77';ctx.save();ctx.scale(.001,.001);ctx.font='69px sans-serif';ctx.fillText(messageBody,500,-750);ctx.restore();
- // Display the first protected photo if uploaded; keep the demo art otherwise.
- if (photoImages.length) {
-   const img=photoImages[Math.floor(Date.now()/4500)%photoImages.length];
-   const ratio=img.width/img.height, boxRatio=.92/.30;
-   let sx=0,sy=0,sw=img.width,sh=img.height;
-   if(ratio>boxRatio){sw=img.height*boxRatio;sx=(img.width-sw)/2;}
-   else {sh=img.width/boxRatio;sy=(img.height-sh)/2;}
-   ctx.drawImage(img,sx,sy,sw,sh,.04,-.67,.92,.30);
- } else {
- const grad=ctx.createLinearGradient(.04,-.65,.04,-.38);grad.addColorStop(0,'#a8d9f5');grad.addColorStop(1,'#dbb4f0');
- roundRect(ctx,.04,-.67,.92,.30,.04,grad);
- ctx.fillStyle='#f9e2a4';ctx.beginPath();ctx.arc(.74,-.58,.07,0,Math.PI*2);ctx.fill();
- ctx.fillStyle='#6b9a9f';ctx.beginPath();ctx.moveTo(.05,-.38);ctx.lineTo(.36,-.60);ctx.lineTo(.56,-.40);ctx.lineTo(.76,-.53);ctx.lineTo(.96,-.39);ctx.closePath();ctx.fill();
- }
- ctx.fillStyle='#f8eee6';ctx.save();ctx.scale(.001,.001);ctx.font='65px sans-serif';ctx.fillText('AR YOSEGAKI',500,-250);ctx.restore();
- ctx.restore();
-}
-function roundRect(c,x,y,w,h,r,fill){c.beginPath();c.roundRect(x,y,w,h,r);c.fillStyle=fill;c.fill();}
+function openDetail(i){selected=i;const detail=$('#detail'),img=$('#detailImage');if(photos.length){const pic=photos[i];if(pic instanceof ImageBitmap){const c=document.createElement('canvas');c.width=pic.width;c.height=pic.height;c.getContext('2d').drawImage(pic,0,0);img.src=c.toDataURL('image/jpeg',.92);}else img.src=pic.src;img.classList.remove('hide');$('#detailEmpty').classList.add('hide');}else{img.classList.add('hide');$('#detailEmpty').classList.remove('hide');}$('#detailCounter').textContent=`${i+1} / ${photos.length||8}`;detail.classList.remove('hide');}
+$('#detailClose').onclick=()=>{selected=-1;$('#detail').classList.add('hide');};
+canvas.addEventListener('pointerdown',e=>{if(phase!=='gallery'||selected>=0)return;dragging=true;dragMoved=false;dragX=e.clientX;dragY=e.clientY;canvas.setPointerCapture(e.pointerId);});
+canvas.addEventListener('pointermove',e=>{if(!dragging)return;const dx=e.clientX-dragX,dy=e.clientY-dragY;if(Math.abs(dx)+Math.abs(dy)>6)dragMoved=true;dragYaw-=dx/innerWidth*1.8;dragPitch=Math.max(-1.1,Math.min(1.1,dragPitch+dy/innerHeight*1.8));dragX=e.clientX;dragY=e.clientY;});
+canvas.addEventListener('pointerup',e=>{if(!dragging)return;dragging=false;if(!dragMoved){const x=e.clientX*(canvas.width/innerWidth),y=e.clientY*(canvas.height/innerHeight);for(let i=hitAreas.length-1;i>=0;i--){const h=hitAreas[i];if(x>=h.x&&x<=h.x+h.w&&y>=h.y&&y<=h.y+h.h){openDetail(h.index);break;}}}});
